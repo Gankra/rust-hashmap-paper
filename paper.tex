@@ -1,0 +1,190 @@
+\documentclass{cccg13}
+
+\usepackage{graphicx,amssymb,amsmath,dsfont}
+
+% URLs
+\usepackage{url}
+
+%comments
+\usepackage{verbatim}
+
+\newcommand{\IR}{\mathbb{R}}
+\newcommand{\C}{\mathcal{C}}
+\newcommand{\MP}{\mathcal{P}}
+\newcommand{\T}{\mathcal{T}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\CH}{Conv}
+
+\title{Implementing A Safe, Efficient, and Secure Hash table in Rust \thanks{A.B. was supported by NSERC.}}
+
+\author{
+Alexis Beingessner\footnotemark[2]
+\and
+Piotr Czarnecki
+\and
+Niko Matsakis
+}
+
+\begin{document}
+\thispagestyle{empty}
+\maketitle
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%ABSTRACT%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{abstract}
+In this paper we describe the strategies used in Rust's standard collections library to implement a robin hood hash table that is memory-safe, thread-safe, fast, and robust against denial of service attacks.
+\end{abstract}
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%INTRO%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Introduction}   \label{secintro}
+
+Hash tables are one of the most important and common data structures used by developers across almost every programming language. They provide excellent practical and theoretical performance, while being relatively simple to write and use. However, because of this ubiquity, any implementation provided by a programming language must be \emph{exceptionally} well written. First and foremost, the implementation must be exceptionally \emph{efficient}, or else it simply won't be used. However, since hash tables are regularly used to process user input, a standard implementation must also be \emph{secure} against certain kinds of \emph{denial of service attacks} (also known as \emph{algorithmic complexity attacks} and \emph{hash flooding attacks}).
+
+In a denial of service attack, a malicious end-user provides data to a service which will somehow trigger degenerate behaviour in a hash table. The simplest attack is to produce a series of values that all hash to the same number. In most hash table implementations, this will result in disastrous performance: search will be reduced to linearly walking over every item in the table, causing operations that are intended to take $O(1)$ time to take $O(n)$ time instead. Even  inserting all of these elements would consequently take $O(n^2)$. This can cause an otherwise well-written application to become unresponsive, denying service to real users.
+
+These kind of attacks were first described in detail in 2003 by Crosby and Wallach \cite{perl-dos} when they demonstrated attacks against the Perl programming language and several applications. Klink and Wälde \cite{web-dos} popularized this kind of attack in 2011 when they published an attack against the hash table implementations in PHP, Java, Ruby, and several other languages that were able to lock up some popular web frameworks using relatively small POST requests.
+
+The solution to this specific attack is simple and well-known: use a \emph{random} hash function.  Generally, this is done by using a single hashing algorithm that incorporates a secret key in the hashing process. A random hash function is chosen by generating a random key per process, thread, or hash table instance. With a sufficiently large key, this should in theory prevent an attacker from identifying a sequence of values that hash to the same number, as a collision in one function is unlikely to be a collision in another random function. However some care must be taken, as a sufficiently motivated attacker may be able to identify which function was chosen by probing the application's behaviour. In 2012, attacks against MurmurHash and CityHash were presented by Aumasson, Bernstein, and Boßlet \cite{murmur-dos}. This is in spite of the fact that these hashing algorithms \emph{were} random.
+
+Even if a good hash function is chosen, collisions are still expected to occur in hash tables, and they must be handled. There are two primary families of hash resolution strategies: chaining, and open addressing. In chaining hash tables, each index in the table contains a pointer to an \emph{auxiliary} structure for storing all values with that hash. The simplest auxiliary structure is a singly-linked list, although any structure can be used. With a robust hash function, chaining tables are fully secure. The only way to produce degenerate behaviour is to produce a large collection of values that all have the exact same hash, which is exactly what the hash function should protect against. In fact, a chaining hash table can be secured against denial of service \emph{without} a secure hash function by making the auxiliary structure a binary search tree.
+
+Unfortunately, chaining is not an appropriate choice for a standard hash table because they generally fail to satisfy the \emph{first} requirement: efficiency. The auxiliary structure adds significant indirection and overhead to the search process. Extra space is consumed just to represent the structure of the table, where ideally the table can just be a single contiguous block of memory. Node-based auxiliary structures in particular also suffer from poor cache-efficiency, and require an allocation for every insertion, which is notoriously slow to do. Using a binary search tree also adds the additional requirement that the keys to be stored in the table are \emph{orderable}.
+
+Open addressing tables avoid these problems by instead trying to find a location in the table that isn't yet occupied. By doing this, the table *can* be represented by a single block of memory, allocations only need to be performed to resize the table, and cache efficiency can potentially be obtained. However, this is significantly more brittle from a security perspective. An attacker no longer needs to be able to produce true hash collisions, they may instead simply produce sequences of values which require the table to search for a very long time before it finds an empty location.
+
+The simplest open addressing scheme is \emph{first-come-first-serve} (FCFS) linear search. In this scheme, if an index is occupied the search procedure simply walks to the right until it finds an empty index (indexing is assumed to be circular in this case). A similar procedure is \emph{last-come-first-serve} (LCFS) linear search, in which the element to be inserted kicks any pre-existing element out of the spot, and tells it to try to insert itself in the next index in the table.
+
+Practical performance for these schemes can be excellent. Modern CPUs excel at linear traversals of memory. Further, the average distance traveled for each insertion can be quite low for these schemes. However, they have a critical security issue: search times have a very high variance. If an attacker is able to trigger queries for an element on-demand, then they need only produce a \emph{single} element that takes a very long time to search for to perform a denial of service attack against a hash table.
+
+\emph{Robin hood hashing} (RHH) is another open addressing scheme similar to FCFS and LCFS that seeks to produce ``fair" search times for all elements. This potentially increases the search times for some elements in order to reduce the search times for others. Like the other schemes, RHH searches linearly for an appropriate location. However RHH also tracks how far an element is from the \emph{ideal bucket} (IB) that its hash specifies. In the case of a collision, priority is given to the element that currently has the \emph{greatest} distance from its ideal bucket (DIB). In this way, robin hood hashing ``takes from the rich, and gives to the poor". Using this scheme, much tighter clustering is required to produce degenerate behaviour than is necessary in FCFS or LCFS.
+
+[TODO diagram: FCFS, LCFS, and RHH on the insertion hash sequence 1,1,2,3,2,1. In FCFS the last inserted element has every element in the table between it and its ideal location; In LCFS the first inserted element has every element in the table between it and its ideal location; In RHH all the distances are more even.]
+
+In FCFS and LCFS, it is also possible to trigger degenerate behaviour without any element being particularly far from its ideal location. Instead, if one can construct a large contiguous block of occupied buckets, one can force the entire block to be traversed by searching for an element \emph{not} found in the table. In FCFS and LCFS, the only way to be certain that an element isn't in the table is to run into an empty bucket. RHH by contrast provides a mechanism to terminate searches for an element that isn't in the table before an empty space is found: If at any point during the search for an element $x$, if an element $y$ is encountered with lower DIB than the current search distance, search can be immediately terminated because if $x$ \emph{were} in the table, the robin hood scheme would have had $x$ displace $y$. Therefore, the only way to create a search of length $k$ is to have an actual element with DIB $k$.
+
+Deletion in RHH effectively reverses the process of insertion. Once the element to delete is found and removed, the elements after it are back-shifted by one bucket until an element in its ideal bucket or an empty space is encountered. It is as if the element was never inserted, and therefore all the properties of insertion and search are trivially preserved.
+
+
+
+
+
+\section{Rust}
+
+Rust is an experimental systems programming language under development by Mozilla. Most notable is its ability to provide much stronger memory safety guarantees than most other procedural programming languages. In particular, it separates code into two classes: safe code, and unsafe code.
+
+In safe code, if there exists a mutable reference to a location in memory, it must be the only way of accessing that memory. Further, all references must always be valid; null or dangling pointers cannot occur. These properties, among others, effectively eliminate most memory-access and data-race errors. In addition, any structure that obeys these rules is thread-safe ``for free", because being thread-\emph{unsafe} requires a mutable reference and another reference to co-exist, which is forbidden by safe code. However, these constraints often aren't trivial to work with. Particularly when implementing data structures, which are often designed with C-like total access in mind.
+
+Unsafe code allows the programmer to bypass the mechanisms that enforce these constraints temporarily. This is done using an ``unsafe" keyword to delimit where the invariants of safe code are guaranteed to be upheld. In this way, users of Rust can primarily work in safe code, where segmentation faults are impossible and uninitialized memory is inaccessible, but can temporarily drop down to unsafe code to achieve the level of control found in C or C++ where deemed necessary.
+
+A Rust programmer's goal is then to minimize the lines of code that are declared unsafe, so as to minimize the places where errors can occur. Further, unsafe code should be primarily relegated to internal implementation details. External APIs should be completely safe. Although unsafe APIs may also be exposed for lower-level access, it should never be *necessary* for a user to write unsafe code to perform a normal operation. For instance, array indexing in Rust is bounds-checked by default, but there exists an unsafe unchecked variant for when performance is critical, and the programmer is certain that they know what they're doing. Ideally, these methods would only be used \emph{after} performance issues are identified.
+
+Due to the performance-critical nature of data structures, unsafe code is an inevitability. Raw uninitialized chunks of memory are a standard building block for array-based structures, and even the back-pointers on a doubly-linked list are considered unsafe by Rust. The goal of data structure design in Rust has thus become to relegate unsafe code to a minimal substructure with a safe interface, to be used by the primary structure.
+
+Interface design has recently gravitated towards providing several wrapper objects which effectively put the structure into different access ``modes". By constraining the set of valid behaviours, operations which would otherwise be unsafe to provide become safe. Rust's \emph{iterator} interface is the easiest understood example of this.
+
+Usually in safe code, acquiring a mutable reference into the contents of a structure effectively locks the structure. While such a reference exists, no other internal references can be acquired because the user could otherwise request the same item multiple times, invalidating Rust's multiple-aliasing restriction. The structure also cannot be modified, because this could invalidate the reference and produce a dangling pointer. However, a collection's \emph{iterator} wraps the object and exposes only one operation called \emph{next} that yields a reference to some internal element that has not yet been yielded. Since the iterator guarantees elements are only yielded once, and no other operations are permitted at this time, it is safe to obtain multiple internal mutable references. Certain mutations can also be safely performed while holding references from an iterator. For instance, it is perfectly safe to delete the element that \emph{would} next be yielded by a linked list's iterator, because this won't effect all the previously yielded references.
+
+
+
+
+\section{Rust's Robin Hood Hash Table}
+
+Rust's standard library of course has an implementation of a hash table. After several iterations of design and implementation, we have converged on a robin hood hash table design as described in the introduction. While this paper describes the implementation in detail, we will not be providing the full code here for the sake of brevity. Such code would also become hopelessly out of date in a short amount of time, as the language is still under active development. If the reader is interested in reviewing the actual code, they can freely view the code on Github. \cite{rust-source}
+
+Our hash table implementation is separated into three modules: map, set, and table. Table is the \emph{unsafe} portion of the implementation. It handles the allocation and manipulation of the raw block of memory, which is exposed through a RawTable type. RawTable's simplicity makes it technically appropriate for implementing different kinds of open addressing hash tables, although this has not been done. Map provides all of the actual \emph{logic} of the implementation. It provides the interface for our HashMap type, and performs all of the robin hood scheme's logic on top of a RawTable. Finally, set provides a HashSet type which is a thin convenience wrapper around HashMap. Thanks to Rust's type system, this is substantially more efficient than possible in other languages.
+
+
+
+
+
+\section{Hashing}
+For several years, Rust's hash table implementation had used SipHash 2-4 \cite{siphash} as the default hashing algorithm. SipHash was specifically designed with preventing hash table denial of service attacks in mind. It has excellent theoretical and experimental properties for preventing an attacker from reliably producing large hash collisions. However, SipHash has a few performance issues. It requires 128 bits of entropy for its private key, which can be expensive if each table has its own SipHash instance. It also requires a certain minimum amount of work to be done in its finalization step, making small keys relatively expensive to hash.
+
+SipHash was deemed too slow for the kind of workloads found in the Rust compiler itself. Thankfully, our hash table is generic over arbitrary streaming hash functions. For these workloads, SipHash was replaced with xxHash, which provides excellent performance and nice distributions on random inputs, but no cryptographic guarantees. This was deemed an acceptable risk for the sake of productivity, as denial of service attacks against a compiler were considered low risk. Or at least, compilation speed was considered a higher priority. However, this produced an awkward schism between secure and performance-critical applications. All applications should ideally be secure, and we certainly don't want people throwing away security in the name of performance.
+
+To solve this, we adopted a hybrid hashing strategy. Today, Rust's hash tables default to using xxHash, but with a special fallback mode to SipHash. If the search for any key takes over 64 steps while using xxHash, we check the current load factor of the table. If the table is more than 63\% full, then we assume that we have had some bad luck, and grow the table. If the table isn't that full, then we assume we are being attacked, and rebuild the table from scratch using SipHash. This of course incurs a substantial one-time cost, but it's a linear cost, and not the quadratic cost that a denial of service attack is after. There is also some overhead over \emph{just} using xxHash in some synthetic benchmarks, but it's a relatively small cost. There are probably richer areas for optimization elsewhere.
+
+
+
+
+
+\section{Resizing}
+
+Consider growing a hash table of capacity $n$. Normally, one would do this by allocating a new table of capacity $2n$, and individually reinserting each element in the old table into the new one using full insertion scheme. This guarantees that the new table is valid and has all the desired statistical properties. Remark that the order we reinsert the elements in should not matter. For simplicity and efficiency, we will consider only \emph{linear} reinsertions, which consist of reinserting all elements in the old table into the new one by increasing order of index.
+
+Recall that our hash generation scheme consists of generating a 64-bit hash and truncating the most significant bits to acquire the element's ideal bucket. When moving to the new table, we simply start using the next most significant bit in the hash. Therefore, if an elements has ideal index $i$ in the old table, it can have one of two ideal locations in the new table. If the new bit is $0$, then the new ideal index is $i$. If the new bit is $1$, then the new ideal index is $n + i$. Intuitively, an element's ideal index doesn't change at all; it is just reinserted into one of two independent tables of size $n$. Of course, this isn't quite true due to our circular indexing scheme, however we will see that this isn't an issue.
+
+\begin{lemma} \label{lem:exists-ideal}
+  Let an \emph{ideal} element be an element in its ideal bucket. Then there always exists an ideal element in any non-empty robin hood hash table.
+\end{lemma}
+
+\begin{proof}
+  If there is an empty bucket in the map, then the element after it must be ideal. If there is not an empty bucket in the map, then there \emph{was} one right before the last element was inserted. Remark that there is no ideal location in the map that the last element can choose in order to displace the ideal element after the previously empty bucket. It cannot directly displace the ideal element, as older elements win in a tie, and any shifting will stop as soon as an element ends up in the empty bucket. Therefore, there will always be an ideal element.
+\end{proof}
+
+\begin{defn}
+  Let a \emph{chain} be a maximal sequence of contiguous elements starting at an ideal element, and terminating before an empty bucket or another ideal element. All elements are in exactly one chain, which we identify by its ideal element.
+\end{defn}
+
+\begin{defn}
+  Let the \emph{first ideal element} be the ideal element in the table with lowest index. By Lemma \ref{lem:exists-ideal}, the first ideal element always exists.
+\end{defn}
+
+We would like to avoid having to perform the full robin hood reinsertion scheme. We would like to instead use the first-come-first-serve reinsertion scheme, as this is fairly minimal with respect to reads and writes performed. We will accomplish this by starting FCFS reinsertion at the first ideal element. We do this to ensure that we start reinsertion at the start of a chain, which is necessary for correctness. As we will show, this produces identical results to performing the full robin hood scheme.
+
+Without loss of generality, we will assume the first ideal element is at index $0$ in the table. This is fine to do because our indexing is circular, and therefore we can arbitrarily redefine the index of this element to be index $0$ without actually changing behaviour. Since the first ideal element has index $0$, no elements have a circularly wrapped index.
+
+\begin{lemma} \label{lem:shrinking-index}
+  If an element was located at index $i$ in the original table, then in whichever of the two new tables an element is inserted, its final index must be strictly $\leq i$
+\end{lemma}
+
+\begin{proof}
+  The only difference between the element's new table and the old table is that some of the elements may have been moved to the other table. Therefore, there is no way for an element to be pushed further from its ideal bucket than it already was in the old table. Further, an element's new index will certainly never drop below its ideal index, which can never be less than $0$. Therefore its index also cannot increase by decreasing enough to circularly wrap.
+\end{proof}
+
+\begin{lemma} \label{lem:still-ideal}
+  After a linear robin hood reinsertion, all previously ideal elements are \emph{still} ideal.
+\end{lemma}
+
+\begin{proof}
+   As an ideal element, the only way to become non-ideal in a robin hood hash table is to have an element with a smaller ideal index attempt to insert itself in your ideal bucket. Every previously ideal element did not have this occur in the old table, and by lemma \ref{lem:shrinking-index} we know that elements only ``go backwards" in the table. Therefore this will never happen.
+\end{proof}
+
+\begin{theorem}
+  A linear robin hood reinsertion from the first ideal element produces identical results to a linear FCFS reinsertion from the same element.
+\end{theorem}
+
+\begin{proof}
+  We will prove this by induction on the number of elements inserted into the new table.
+
+  Base case ($k = 1$): There can be no collisions if only one element has been inserted, so this follows trivially.
+
+  Inductive Step: Assume that we have inserted $k$ elements into the new table, and wish to insert a new element $x$.
+
+  If $x$ was ideal in the old table, then by lemma \ref{lem:still-ideal} it will never be successfully challenged during robin hood reinsertion. By our inductive hypothesis, all the elements currently in the new table are exactly as they would be if they were inserted using robin hood reinsertion. Therefore, the ideal bucket for $x$ must be empty, and it will be inserted in its ideal location as in robin hood reinsertion.
+
+  If $x$ was \emph{not} ideal in the old table, let $i$ be the ideal index of $x$ in the old table, and $d > 0$ be its old distance from $i$. Then in the old table $x$ was part of a chain of in which there were $d$ elements with ideal index $\leq i$ before it, as this is the only way to displace an element $d$ indices from its ideal bucket. All $d$ of these elements were already inserted into the new table, because we are inserting elements in increasing order. By our inductive hypothesis they are all in exactly the same location they would have been in by robin hood reinsertion. Some of them may be part of the ``other" half of the new table, but some of them may be in this half. All of the elements that were put in this half of the table still have an ideal location less than $x$'s, and therefore would all ``beat" $x$ in a robin hood challenge. Therefore $x$ will be inserted in the same place using FCFS reinsertion as robin hood reinsertion.
+\end{proof}
+
+\section{conclusion}
+
+TODO
+
+\addcontentsline{toc}{chapter}{References}
+\small
+\bibliographystyle{abbrv}
+\bibliography{bibliography}
+
+\end{document}
+
+
