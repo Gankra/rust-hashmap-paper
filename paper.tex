@@ -65,9 +65,9 @@ attack is to produce a series of values that all hash to the same number. In
 most hash table implementations, this will result in disastrous performance:
 search will be reduced to linearly walking over every item in the table,
 causing operations that are intended to take $O(1)$ time to take $O(n)$ time
-instead. Inserting all of these elements would consequently take
-$O(n^2)$. This can cause an otherwise well-written application to become
-unresponsive, denying service to real users.
+instead. Inserting all of these elements would consequently take $O(n^2)$.
+This can cause an otherwise well-written application to become unresponsive,
+denying service to real users.
 
 These kind of attacks were first described in detail in 2003 by Crosby and
 Wallach \cite{perl-dos} when they demonstrated attacks against the Perl
@@ -188,22 +188,22 @@ and unsafe code.
 
 In safe code, if there exists a reference, whether or not mutable, to a
 location in memory, there can be no other way of \emph{mutating} that memory.
-Further, all references must
-always be valid; null or dangling pointers cannot occur. These properties,
-among others, effectively eliminate most memory-access and data-race errors.
-In addition, any structure that obeys these rules is thread-safe ``for free",
-because being thread-\emph{unsafe} requires a mutable reference and another
-reference to co-exist, which is forbidden by safe code. However, these
-constraints often aren't trivial to work with. Particularly when implementing
-data structures, which are often designed with C-like total access in mind.
+Further, all references must always be valid; null or dangling pointers cannot
+occur. These properties, among others, effectively eliminate most memory-
+access and data-race errors. In addition, any structure that obeys these rules
+is thread-safe ``for free", because being thread-\emph{unsafe} requires a
+mutable reference and another reference to co-exist, which is forbidden by
+safe code. However, these constraints often aren't trivial to work with.
+Particularly when implementing data structures, which are often designed with
+C-like total access in mind.
 
 Unsafe code allows the programmer to bypass the mechanisms that enforce these
-constraints locally. This is done using an ``unsafe" keyword to delimit
-where the invariants of safe code are guaranteed to be upheld. In this way,
-users of Rust can primarily work in safe code, where segmentation faults are
-impossible and uninitialized memory is inaccessible, but can temporarily drop
-down to unsafe code to achieve the level of control found in C or C++ where
-deemed necessary.
+constraints locally. This is done using an ``unsafe" keyword to delimit where
+the invariants of safe code are guaranteed to be upheld. In this way, users of
+Rust can primarily work in safe code, where segmentation faults are impossible
+and uninitialized memory is inaccessible, but can temporarily drop down to
+unsafe code to achieve the level of control found in C or C++ where deemed
+necessary.
 
 A Rust programmer's goal is then to minimize the lines of code that are
 declared unsafe, so as to minimize the places where errors can occur. Further,
@@ -288,12 +288,12 @@ small keys relatively expensive to hash.
 
 SipHash was deemed too slow for the kind of workloads found in the Rust
 compiler itself. Thankfully, our hash table is generic over arbitrary
-streaming hash functions. For these workloads, SipHash was replaced with
-FNV, which provides excellent performance and nice distributions on random
-inputs, but no cryptographic guarantees. This was deemed an acceptable risk
-for the sake of productivity, as denial of service attacks against a compiler
-were considered low risk. Or at least, compilation speed was considered a
-higher priority. However, this produced an awkward schism between secure and
+streaming hash functions. For these workloads, SipHash was replaced with FNV,
+which provides excellent performance and nice distributions on random inputs,
+but no cryptographic guarantees. This was deemed an acceptable risk for the
+sake of productivity, as denial of service attacks against a compiler were
+considered low risk. Or at least, compilation speed was considered a higher
+priority. However, this produced an awkward schism between secure and
 performance-critical applications. All applications should ideally be secure,
 and we certainly don't want people throwing away security in the name of
 performance.
