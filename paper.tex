@@ -65,7 +65,7 @@ attack is to produce a series of values that all hash to the same number. In
 most hash table implementations, this will result in disastrous performance:
 search will be reduced to linearly walking over every item in the table,
 causing operations that are intended to take $O(1)$ time to take $O(n)$ time
-instead. Even  inserting all of these elements would consequently take
+instead. Inserting all of these elements would consequently take
 $O(n^2)$. This can cause an otherwise well-written application to become
 unresponsive, denying service to real users.
 
@@ -78,7 +78,7 @@ that were able to lock up some popular web frameworks using relatively small
 POST requests.
 
 The solution to this specific attack is simple and well-known: use a
-\emph{random} hash function.  Generally, this is done by using a single
+\emph{randomized} hash function.  Generally, this is done by using a single
 hashing algorithm that incorporates a secret key in the hashing process. A
 random hash function is chosen by generating a random key per process, thread,
 or hash table instance. With a sufficiently large key, this should in theory
@@ -88,12 +88,13 @@ another random function. However some care must be taken, as a sufficiently
 motivated attacker may be able to identify which function was chosen by
 probing the application's behaviour. In 2012, attacks against MurmurHash and
 CityHash were presented by Aumasson, Bernstein, and Boßlet \cite{murmur-dos}.
-This is in spite of the fact that these hashing algorithms \emph{were} random.
+This is in spite of the fact that these hashing algorithms \emph{were}
+randomized.
 
 Even if a good hash function is chosen, collisions are still expected to occur
 in hash tables, and they must be handled. There are two primary families of
-hash resolution strategies: chaining, and open addressing. In chaining hash
-tables, each index in the table contains a pointer to an \emph{auxiliary}
+collision resolution strategies: chaining, and open addressing. In chaining
+hash tables, each index in the table contains a pointer to an \emph{auxiliary}
 structure for storing all values with that hash. The simplest auxiliary
 structure is a singly-linked list, although any structure can be used. With a
 robust hash function, chaining tables are fully secure. The only way to
@@ -114,13 +115,10 @@ notoriously slow to do. Using a binary search tree also adds the additional
 requirement that the keys to be stored in the table are \emph{orderable}.
 
 Open addressing tables avoid these problems by instead trying to find a
-location in the table that isn't yet occupied. By doing this, the table *can*
-be represented by a single block of memory, allocations only need to be
-performed to resize the table, and cache efficiency can potentially be
-obtained. However, this is significantly more brittle from a security
-perspective. An attacker no longer needs to be able to produce true hash
-collisions, they may instead simply produce sequences of values which require
-the table to search for a very long time before it finds an empty location.
+location in the table that isn't yet occupied. By doing this, the table
+\emph{can} be represented by a single block of memory, allocations only need
+to be performed to resize the table, and cache efficiency can potentially be
+improved.
 
 The simplest open addressing scheme is \emph{first-come-first-serve} (FCFS)
 linear search. In this scheme, if an index is occupied the search procedure
@@ -170,7 +168,7 @@ the table, the robin hood scheme would have had $x$ displace $y$. Therefore,
 the only way to create a search of length $k$ is to have an actual element
 with DIB $k$.
 
-Deletion in RHH effectively reverses the process of insertion. Once the
+Deletion in RHH can effectively reverse the process of insertion. Once the
 element to delete is found and removed, the elements after it are back-shifted
 by one bucket until an element in its ideal bucket or an empty space is
 encountered. It is as if the element was never inserted, and therefore all the
@@ -185,10 +183,12 @@ properties of insertion and search are trivially preserved.
 Rust is an experimental systems programming language under development by
 Mozilla. Most notable is its ability to provide much stronger memory safety
 guarantees than most other procedural programming languages. In particular, it
-separates code into two classes: safe code, and unsafe code.
+has a simple effect system that separates code into two classes: safe code,
+and unsafe code.
 
-In safe code, if there exists a mutable reference to a location in memory, it
-must be the only way of accessing that memory. Further, all references must
+In safe code, if there exists a reference, whether or not mutable, to a
+location in memory, there can be no other way of \emph{mutating} that memory.
+Further, all references must
 always be valid; null or dangling pointers cannot occur. These properties,
 among others, effectively eliminate most memory-access and data-race errors.
 In addition, any structure that obeys these rules is thread-safe ``for free",
@@ -198,7 +198,7 @@ constraints often aren't trivial to work with. Particularly when implementing
 data structures, which are often designed with C-like total access in mind.
 
 Unsafe code allows the programmer to bypass the mechanisms that enforce these
-constraints temporarily. This is done using an ``unsafe" keyword to delimit
+constraints locally. This is done using an ``unsafe" keyword to delimit
 where the invariants of safe code are guaranteed to be upheld. In this way,
 users of Rust can primarily work in safe code, where segmentation faults are
 impossible and uninitialized memory is inaccessible, but can temporarily drop
@@ -216,8 +216,8 @@ variant for when performance is critical, and the programmer is certain that
 they know what they're doing. Ideally, these methods would only be used
 \emph{after} performance issues are identified.
 
-Due to the performance-critical nature of data structures, unsafe code is an
-inevitability. Raw uninitialized chunks of memory are a standard building
+Due to the performance-critical nature of data structures, the use of unsafe
+code is inevitable. Raw uninitialized chunks of memory are a standard building
 block for array-based structures, and even the back-pointers on a doubly-
 linked list are considered unsafe by Rust. The goal of data structure design
 in Rust has thus become to relegate unsafe code to a minimal substructure with
@@ -289,7 +289,7 @@ small keys relatively expensive to hash.
 SipHash was deemed too slow for the kind of workloads found in the Rust
 compiler itself. Thankfully, our hash table is generic over arbitrary
 streaming hash functions. For these workloads, SipHash was replaced with
-xxHash, which provides excellent performance and nice distributions on random
+FNV, which provides excellent performance and nice distributions on random
 inputs, but no cryptographic guarantees. This was deemed an acceptable risk
 for the sake of productivity, as denial of service attacks against a compiler
 were considered low risk. Or at least, compilation speed was considered a
@@ -319,8 +319,8 @@ richer areas for optimization elsewhere.
 Consider growing a hash table of capacity $n$. Normally, one would do this by
 allocating a new table of capacity $2n$, and individually reinserting each
 element in the old table into the new one using full insertion scheme. This
-guarantees that the new table is valid and has all the desired statistical
-properties. Remark that the order we reinsert the elements in should not
+guarantees that the new table is valid and all essential invariants hold.
+Remark that the order we reinsert the elements in should not
 matter. For simplicity and efficiency, we will consider only \emph{linear}
 reinsertions, which consist of reinserting all elements in the old table into
 the new one by increasing order of index.
